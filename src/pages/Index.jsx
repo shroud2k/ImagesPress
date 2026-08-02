@@ -71,9 +71,11 @@ const PRESET_SIZES = [
 
 const RENDER_BATCH = 10;
 const CONCURRENT_LIMIT = 3;
+const MAX_FILE_SIZE = 200 * 1024 * 1024; // 单文件最大 200MB（1.1）
+const MAX_FILE_COUNT = 100; // 最多 100 个文件（1.2）
 
-let fileIdCounter = 0;
-const nextId = () => ++fileIdCounter;
+// 使用时间戳+随机数生成唯一 ID，避免 HMR 后计数器不重置的问题（3.2）
+const nextId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
 async function extractFilesFromDataTransfer(dataTransfer) {
 	const allFiles = [];
@@ -128,7 +130,10 @@ async function traverseEntry(entry, allFiles) {
 function readAllEntriesSafe(reader) {
 	return new Promise((resolve) => {
 		if (typeof reader.readAllEntries === "function") {
-			reader.readAllEntries(resolve, () => resolve([]));
+			reader.readAllEntries(resolve, (err) => {
+				console.warn("readAllEntries 失败:", err);
+				resolve([]);
+			});
 			return;
 		}
 		const allEntries = [];
@@ -141,7 +146,10 @@ function readAllEntriesSafe(reader) {
 						readBatch();
 					}
 				},
-				() => resolve(allEntries),
+				(err) => {
+					console.warn("readEntries 失败:", err);
+					resolve(allEntries);
+				},
 			);
 		};
 		readBatch();
@@ -152,6 +160,7 @@ const FileRow = memo(function FileRow({
 	item,
 	onRemove,
 	onDownload,
+	onRetry,
 	isCompressing,
 }) {
 	const { file, status, progress, result, error, preview } = item;
@@ -261,7 +270,17 @@ const FileRow = memo(function FileRow({
 					</span>
 				)}
 				{status === "error" && (
-					<AlertCircle className="w-4 h-4" style={{ color: C.error }} />
+					<>
+						<AlertCircle className="w-4 h-4" style={{ color: C.error }} />
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-8 w-8 p-0 rounded-none"
+							onClick={() => onRetry(item)}
+						>
+							<RotateCcw className="w-4 h-4" style={{ color: C.blue }} />
+						</Button>
+					</>
 				)}
 				{status !== "compressing" && (
 					<Button
@@ -341,7 +360,7 @@ const Index = () => {
 		() => doneFiles.reduce((s, f) => s + (f.result?.compressedSize || 0), 0),
 		[doneFiles],
 	);
-	const hasResults = doneFiles.length > 0;
+	const hasResults = doneFiles.length > 0 || skippedFiles.length > 0;
 	const visibleFiles = useMemo(
 		() => files.slice(0, visibleCount),
 		[files, visibleCount],
@@ -366,9 +385,20 @@ const Index = () => {
 	}, []);
 
 	const addFiles = useCallback((fileList) => {
+		// 文件数量限制（1.2）
+		if (filesRef.current.length + fileList.length > MAX_FILE_COUNT) {
+			toast.error(`最多支持 ${MAX_FILE_COUNT} 个文件，当前已有 ${filesRef.current.length} 个`);
+			return;
+		}
 		const newFiles = [],
-			unsupported = [];
+			unsupported = [],
+			tooLarge = [];
 		for (const file of fileList) {
+			// 文件大小限制（1.1）
+			if (file.size > MAX_FILE_SIZE) {
+				tooLarge.push(file.name);
+				continue;
+			}
 			if (isSupportedImage(file)) {
 				newFiles.push({
 					id: nextId(),
@@ -383,6 +413,8 @@ const Index = () => {
 				unsupported.push(file.name);
 			}
 		}
+		if (tooLarge.length > 0)
+			toast.error(`${tooLarge.length} 个文件超过 200MB 限制：${tooLarge.slice(0, 3).join("、")}${tooLarge.length > 3 ? " 等" : ""}`);
 		if (unsupported.length > 0)
 			toast.warning(`已跳过 ${unsupported.length} 个不支持的文件`);
 		if (newFiles.length > 0) {
@@ -436,7 +468,12 @@ const Index = () => {
 	}, []);
 
 	const clearAll = useCallback(() => {
-		filesRef.current.forEach((f) => {
+		// 基于快照清空，避免竞态（4.2）
+		const snapshot = filesRef.current;
+		if (snapshot.length > 0 && !window.confirm(`确定要清空所有 ${snapshot.length} 个文件吗？`)) {
+			return;
+		}
+		snapshot.forEach((f) => {
 			if (f.preview) URL.revokeObjectURL(f.preview);
 		});
 		setFiles([]);
@@ -444,7 +481,25 @@ const Index = () => {
 		setVisibleCount(RENDER_BATCH);
 	}, []);
 
-	const handleCompress = async () => {
+	// 重置单个失败文件为待压缩状态（4.4）
+	const retryFile = useCallback((id) => {
+		setFiles((prev) =>
+			prev.map((f) =>
+				f.id === id ? { ...f, status: "pending", progress: 0, error: null } : f
+			)
+		);
+	}, []);
+
+	// 重置所有失败文件为待压缩状态（4.4）
+	const retryAllFailed = useCallback(() => {
+		setFiles((prev) =>
+			prev.map((f) =>
+				f.status === "error" ? { ...f, status: "pending", progress: 0, error: null } : f
+			)
+		);
+	}, []);
+
+	const handleCompress = useCallback(async () => {
 		const currentPending = filesRef.current.filter(
 			(f) => f.status === "pending",
 		);
@@ -455,6 +510,10 @@ const Index = () => {
 		if (maxSizeMB <= 0) {
 			toast.error("请设置有效的目标大小");
 			return;
+		}
+		// 目标大小下限警告（4.1）
+		if (maxSizeMB < 0.5) {
+			toast.warning("目标大小较小，压缩后画质可能有明显损失");
 		}
 		setIsCompressing(true);
 		setOverallProgress(0);
@@ -507,62 +566,85 @@ const Index = () => {
 					if (item) await compressOne(item);
 				}
 			});
-		await Promise.all(workers);
-		setIsCompressing(false);
-		pausedRef.current = false;
-		setIsPaused(false);
-
-		const parts = [];
-		if (succeeded > 0) parts.push(`${succeeded} 张已压缩`);
-		if (skipped > 0) parts.push(`${skipped} 张已小于 ${maxSizeMB}MB，无需压缩`);
-		if (failed > 0) parts.push(`${failed} 张失败`);
-		if (succeeded > 0)
-			toast.success("压缩完成！", { description: parts.join("，") });
-		else if (skipped > 0 && failed === 0)
-			toast.info("没有需要压缩的图片", {
-				description: `所有图片都已小于 ${maxSizeMB}MB，无需压缩`,
-			});
-		else toast.warning("压缩完成", { description: parts.join("，") });
-	};
+		// 并发控制：JavaScript 单线程下 shift() 是原子的，多个 worker 不会重复处理同一文件（5.3）
+		try {
+			await Promise.all(workers);
+			const parts = [];
+			if (succeeded > 0) parts.push(`${succeeded} 张已压缩`);
+			if (skipped > 0) parts.push(`${skipped} 张已小于 ${maxSizeMB}MB，无需压缩`);
+			if (failed > 0) parts.push(`${failed} 张失败`);
+			if (succeeded > 0)
+				toast.success("压缩完成！", { description: parts.join("，") });
+			else if (skipped > 0 && failed === 0)
+				toast.info("没有需要压缩的图片", {
+					description: `所有图片都已小于 ${maxSizeMB}MB，无需压缩`,
+				});
+			else toast.warning("压缩完成", { description: parts.join("，") });
+		} catch (err) {
+			// 全局错误兜底：防止异常导致 isCompressing 状态无法重置（3.3）
+			toast.error("压缩过程出错: " + err.message);
+		} finally {
+			setIsCompressing(false);
+			pausedRef.current = false;
+			setIsPaused(false);
+		}
+	}, [maxSizeMB, quality]);
 
 	const downloadSingle = useCallback((fileItem) => {
 		if (!fileItem.result) return;
-		const url = URL.createObjectURL(fileItem.result.blob);
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = fileItem.result.fileName;
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
+		let url;
+		try {
+			url = URL.createObjectURL(fileItem.result.blob);
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = fileItem.result.fileName;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+		} finally {
+			// 确保异常时也能释放 Object URL（3.4）
+			if (url) URL.revokeObjectURL(url);
+		}
 	}, []);
 
-	const downloadAll = async () => {
+	const downloadAll = useCallback(async () => {
 		if (doneFiles.length === 0) return;
 		if (doneFiles.length === 1) {
 			downloadSingle(doneFiles[0]);
 			return;
 		}
-		toast.info("正在打包 ZIP...");
+		const zipToastId = "zip-packaging";
+		toast.loading("正在打包 ZIP...", { id: zipToastId });
+		let url;
 		try {
 			const zip = new JSZip();
 			for (const f of doneFiles) {
 				if (f.result) zip.file(f.result.fileName, f.result.blob);
 			}
-			const content = await zip.generateAsync({ type: "blob" });
-			const url = URL.createObjectURL(content);
+			const content = await zip.generateAsync(
+				{ type: "blob" },
+				// ZIP 打包进度反馈（2.4）
+				(metadata) => {
+					toast.loading(`正在打包 ZIP... ${Math.round(metadata.percent)}%`, {
+						id: zipToastId,
+					});
+				},
+			);
+			url = URL.createObjectURL(content);
 			const a = document.createElement("a");
 			a.href = url;
 			a.download = "compressed-images.zip";
 			document.body.appendChild(a);
 			a.click();
 			document.body.removeChild(a);
-			URL.revokeObjectURL(url);
-			toast.success("ZIP 下载已开始");
+			toast.success("ZIP 下载已开始", { id: zipToastId });
 		} catch (err) {
-			toast.error("打包失败: " + err.message);
+			toast.error("打包失败: " + err.message, { id: zipToastId });
+		} finally {
+			// 确保异常时也能释放 Object URL（3.4）
+			if (url) URL.revokeObjectURL(url);
 		}
-	};
+	}, [doneFiles, downloadSingle]);
 
 	const handleSizeInputChange = (val) => {
 		setMaxSizeInput(val);
@@ -701,10 +783,11 @@ const Index = () => {
 									压缩后每张图片不超过
 								</label>
 								<div className="flex items-center gap-2">
-									<Input
-										type="number"
-										min="0.1"
-										step="0.1"
+								<Input
+									type="number"
+									min="0.1"
+									max="200"
+									step="0.1"
 										value={maxSizeInput}
 										onChange={(e) => handleSizeInputChange(e.target.value)}
 										className="h-12 text-lg border rounded-none focus-visible:ring-1"
@@ -764,13 +847,10 @@ const Index = () => {
 								style={{ color: C.inkSubtle }}
 							>
 								<Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
-								<span>
-									100% 表示压缩到目标大小（如 {maxSizeMB}
-									MB）。降低质量百分比会进一步缩小文件，例如设置为 90%
-									时，输出大小约为目标大小的 90%（即{" "}
-									{(maxSizeMB * 0.9).toFixed(1)}
-									MB）。数值越低文件越小，但图片质量损失越大。
-								</span>
+						<span>
+							100% = 压缩到 {maxSizeMB}MB。降低百分比可进一步缩小文件，例如 90% ≈{" "}
+							{(maxSizeMB * 0.9).toFixed(1)}MB。数值越低文件越小，画质损失越大。
+						</span>
 							</div>
 						</div>
 						<div
@@ -801,6 +881,15 @@ const Index = () => {
 						onDragOver={handleDragOver}
 						onDragLeave={handleDragLeave}
 						onDrop={handleDrop}
+						role="button"
+						tabIndex={0}
+						aria-label="拖拽图片或文件夹到此处，或点击选择文件"
+						onKeyDown={(e) => {
+							if (e.key === "Enter" || e.key === " ") {
+								e.preventDefault();
+								fileInputRef.current?.click();
+							}
+						}}
 						className="border-2 border-dashed p-12 text-center transition-colors cursor-pointer"
 						style={{
 							borderColor: isDragOver ? C.blue : C.hairline,
@@ -883,8 +972,6 @@ const Index = () => {
 							"TIFF",
 							"HEIC",
 							"BMP",
-							"RAW",
-							"DNG",
 						].map((fmt) => (
 							<span
 								key={fmt}
@@ -931,15 +1018,16 @@ const Index = () => {
 							className="border divide-y"
 							style={{ borderColor: C.hairline }}
 						>
-							{visibleFiles.map((fileItem) => (
-								<FileRow
-									key={fileItem.id}
-									item={fileItem}
-									onRemove={removeFile}
-									onDownload={downloadSingle}
-									isCompressing={isCompressing}
-								/>
-							))}
+						{visibleFiles.map((fileItem) => (
+							<FileRow
+								key={fileItem.id}
+								item={fileItem}
+								onRemove={removeFile}
+								onDownload={downloadSingle}
+								onRetry={retryFile}
+								isCompressing={isCompressing}
+							/>
+						))}
 						</div>
 						{hasMoreFiles && (
 							<div
@@ -1072,9 +1160,16 @@ const Index = () => {
 											</span>
 										)}
 										{errorFiles.length > 0 && (
-											<span style={{ color: C.error }}>
+											<span style={{ color: C.error }} className="flex items-center">
 												<AlertCircle className="w-4 h-4 inline mr-1" />
 												失败 {errorFiles.length} 张
+												<button
+													onClick={retryAllFailed}
+													className="ml-2 text-xs underline hover:opacity-70"
+													style={{ color: C.blue }}
+												>
+													重试全部
+												</button>
 											</span>
 										)}
 										{totalCompressed > 0 && totalOriginal > 0 && (
@@ -1116,32 +1211,36 @@ const Index = () => {
 										className="text-base font-normal mb-1"
 										style={{ color: C.ink }}
 									>
-										{doneFiles.length} 张图片已压缩完成
+											{doneFiles.length > 0
+												? `${doneFiles.length} 张图片已压缩完成`
+												: `${skippedFiles.length} 张图片已小于目标大小，无需压缩`}
 									</p>
 									<p className="text-sm" style={{ color: C.inkSubtle }}>
 										原始总大小 {formatFileSize(totalOriginal)} → 压缩后{" "}
 										{formatFileSize(totalCompressed)}
 									</p>
 								</div>
-								<div className="flex gap-3">
-									<Button
-										onClick={downloadAll}
-										className="h-12 px-6 text-sm rounded-none"
-										style={{ backgroundColor: C.blue, color: "#fff" }}
-									>
-										<Package className="w-4 h-4 mr-2" />
-										{doneFiles.length > 1 ? "打包下载 ZIP" : "下载图片"}
-									</Button>
-									<Button
-										variant="outline"
-										onClick={clearAll}
-										className="h-12 px-6 text-sm rounded-none"
-										style={{ borderColor: C.inkMuted, color: C.inkMuted }}
-									>
-										<RotateCcw className="w-4 h-4 mr-2" />
-										重新开始
-									</Button>
-								</div>
+						<div className="flex gap-3">
+							{doneFiles.length > 0 && (
+								<Button
+									onClick={downloadAll}
+									className="h-12 px-6 text-sm rounded-none"
+									style={{ backgroundColor: C.blue, color: "#fff" }}
+								>
+									<Package className="w-4 h-4 mr-2" />
+									{doneFiles.length > 1 ? "打包下载 ZIP" : "下载图片"}
+								</Button>
+							)}
+							<Button
+								variant="outline"
+								onClick={clearAll}
+								className="h-12 px-6 text-sm rounded-none"
+								style={{ borderColor: C.inkMuted, color: C.inkMuted }}
+							>
+								<RotateCcw className="w-4 h-4 mr-2" />
+								重新开始
+							</Button>
+						</div>
 							</div>
 						</div>
 					</section>

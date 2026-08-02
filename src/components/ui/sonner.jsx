@@ -1,12 +1,10 @@
-import { useTheme } from "next-themes";
 import { Toaster as Sonner } from "sonner";
 
+// next-themes 已移除：项目无暗色模式切换，使用固定 light 主题（3.1）
 const Toaster = ({ ...props }) => {
-	const { theme = "system" } = useTheme();
-
 	return (
 		<Sonner
-			theme={theme}
+			theme="light"
 			className="toaster group"
 			toastOptions={{
 				classNames: {
