@@ -1,18 +1,12 @@
 import { Toaster } from "@/components/ui/sonner";
-import { HashRouter, Routes, Route } from "react-router-dom";
-import { navItems } from "./nav-items";
+import Index from "./pages/Index.jsx";
 import ErrorBoundary from "./components/ErrorBoundary";
 
+// 6.3: 单页面应用仅有一个路由，移除 react-router-dom 依赖
 const App = () => (
 	<ErrorBoundary>
-		<HashRouter>
-			<Toaster />
-			<Routes>
-				{navItems.map(({ to, page }) => (
-					<Route key={to} path={to} element={page} />
-				))}
-			</Routes>
-		</HashRouter>
+		<Toaster />
+		<Index />
 	</ErrorBoundary>
 );
 

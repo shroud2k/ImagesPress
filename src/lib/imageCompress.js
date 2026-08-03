@@ -59,6 +59,16 @@ async function convertHeicToJpeg(file) {
 		if (Array.isArray(blob) && blob.length > 0) return blob[0];
 		throw new Error("HEIC 转换返回空结果");
 	} catch (err) {
+		// 3.1: 区分动态导入失败与格式转换失败，提供更准确的错误提示
+		const msg = err?.message || "";
+		if (
+			msg.includes("Failed to fetch") ||
+			msg.includes("Loading chunk") ||
+			msg.includes("Importing a module script failed") ||
+			err instanceof TypeError
+		) {
+			throw new Error("HEIC 解码库加载失败，请检查网络连接后重试");
+		}
 		throw new Error(`HEIC 格式转换失败: ${file.name}`);
 	}
 }
@@ -108,7 +118,19 @@ async function fileToImageBitmap(file) {
 		return createImageBitmap(jpegBlob);
 	}
 	warnIfRaw(file);
-	return createImageBitmap(file);
+	try {
+		return await createImageBitmap(file);
+	} catch (err) {
+		// 3.2: 对 createImageBitmap 的错误进行分类，提供更有意义的错误信息
+		if (err?.name === "SecurityError") {
+			throw new Error(`图片格式不被浏览器安全策略支持: ${file.name}`);
+		}
+		if (err?.name === "InvalidStateError") {
+			throw new Error(`图片可能已损坏或格式不受支持: ${file.name}`);
+		}
+		// 其他错误让上层回退逻辑处理
+		throw err;
+	}
 }
 
 function hasTransparency(file) {
@@ -266,6 +288,16 @@ export function getPreviewUrl(file, maxPreviewSizeMB = 50) {
 	if (previewable.includes(ext) || file.type?.startsWith("image/"))
 		return URL.createObjectURL(file);
 	return null;
+}
+
+// 4.7: 封装 Object URL 清理逻辑，统一错误处理
+export function revokePreviewUrl(url) {
+	if (!url) return;
+	try {
+		URL.revokeObjectURL(url);
+	} catch (_) {
+		// 忽略释放异常（URL 可能已被自动回收）
+	}
 }
 
 export function getFormatLabel(fileName) {

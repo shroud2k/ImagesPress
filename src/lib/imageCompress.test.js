@@ -1,4 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// 3.1: mock heic2any 模块，用于测试 HEIC 错误分类
+vi.mock("heic2any", () => ({
+	default: vi.fn(),
+}));
+
 import {
 	formatFileSize,
 	isSupportedImage,
@@ -7,6 +13,7 @@ import {
 	SUPPORTED_FORMATS,
 	CompressAbortError,
 	compressImage,
+	getPreviewUrl,
 } from "./imageCompress";
 
 // ===================== formatFileSize 测试（5.1 回归） =====================
@@ -243,3 +250,221 @@ describe("compressImage - 跳过逻辑", () => {
 		}
 	});
 });
+
+// ===================== getPreviewUrl 测试（审计 7.1 边界测试） =====================
+
+describe("getPreviewUrl", () => {
+	const makeFile = (name, size, type = "") =>
+		new File([new Uint8Array(size)], name, { type });
+
+	it("文件超过预览大小限制时返回 null", () => {
+		// 2MB 文件，限制 1MB
+		const file = makeFile("big.jpg", 2 * 1024 * 1024, "image/jpeg");
+		expect(getPreviewUrl(file, 1)).toBe(null);
+	});
+
+	it("文件等于预览大小限制时返回 URL（边界值）", () => {
+		// 恰好 1MB，限制 1MB（file.size > maxPreviewSizeMB * 1024 * 1024 为 false）
+		const file = makeFile("exact.jpg", 1024 * 1024, "image/jpeg");
+		// 需要模拟 URL.createObjectURL
+		const origCreate = URL.createObjectURL;
+		URL.createObjectURL = vi.fn(() => "blob:mock");
+		try {
+			expect(getPreviewUrl(file, 1)).toBe("blob:mock");
+		} finally {
+			URL.createObjectURL = origCreate;
+		}
+	});
+
+	it("0 字节文件返回 URL（边界值）", () => {
+		const file = makeFile("empty.jpg", 0, "image/jpeg");
+		const origCreate = URL.createObjectURL;
+		URL.createObjectURL = vi.fn(() => "blob:empty");
+		try {
+			expect(getPreviewUrl(file, 50)).toBe("blob:empty");
+		} finally {
+			URL.createObjectURL = origCreate;
+		}
+	});
+
+	it("非预览格式且无 image MIME 时返回 null", () => {
+		// .tiff 不在预览格式列表中，且无 MIME 类型
+		const file = makeFile("doc.tiff", 1024, "");
+		expect(getPreviewUrl(file, 50)).toBe(null);
+	});
+
+	it("非预览格式但有 image MIME 时返回 URL", () => {
+		// .tiff 不在预览格式列表中，但有 image/ MIME
+		const file = makeFile("img.tiff", 1024, "image/tiff");
+		const origCreate = URL.createObjectURL;
+		URL.createObjectURL = vi.fn(() => "blob:tiff");
+		try {
+			expect(getPreviewUrl(file, 50)).toBe("blob:tiff");
+		} finally {
+			URL.createObjectURL = origCreate;
+		}
+	});
+
+	it("HEIC 格式不在预览列表中且无 image MIME 时返回 null", () => {
+		const file = makeFile("photo.heic", 1024, "");
+		expect(getPreviewUrl(file, 50)).toBe(null);
+	});
+
+	it("SVG 格式在预览列表中返回 URL", () => {
+		const file = makeFile("icon.svg", 512, "image/svg+xml");
+		const origCreate = URL.createObjectURL;
+		URL.createObjectURL = vi.fn(() => "blob:svg");
+		try {
+			expect(getPreviewUrl(file, 50)).toBe("blob:svg");
+		} finally {
+			URL.createObjectURL = origCreate;
+		}
+	});
+
+	it("自定义 maxPreviewSizeMB 生效", () => {
+		// 60KB 文件，默认 50MB 限制可以预览，但设为 0.05MB (≈51.2KB) 则不行
+		const file = makeFile("test.jpg", 60 * 1024, "image/jpeg");
+		expect(getPreviewUrl(file, 0.05)).toBe(null);
+		expect(getPreviewUrl(file, 50)).not.toBe(null);
+		// 清理 URL
+		const origRevoke = URL.revokeObjectURL;
+		URL.revokeObjectURL = vi.fn();
+		URL.revokeObjectURL = origRevoke;
+	});
+});
+
+// ===================== compressImage 边界测试（审计 7.1） =====================
+
+describe("compressImage - 边界条件", () => {
+	it("0 字节文件直接跳过（边界值）", async () => {
+		const file = new File([new Uint8Array(0)], "empty.jpg", {
+			type: "image/jpeg",
+		});
+		const result = await compressImage(file, 1, {});
+		expect(result.skipped).toBe(true);
+		expect(result.compressedSize).toBe(0);
+		expect(result.blob).toBe(file);
+	});
+
+	it("文件大小恰好等于目标时跳过（边界值）", async () => {
+		// 1MB = 1048576 bytes，目标 1MB
+		const file = new File(
+			[new Uint8Array(1048576)],
+			"exact.jpg",
+			{ type: "image/jpeg" },
+		);
+		const result = await compressImage(file, 1, {});
+		// originalSize (1048576) <= targetBytes (1048576) → skip
+		expect(result.skipped).toBe(true);
+	});
+
+	it("quality=0 时 effective target 为 0，不跳过", async () => {
+		// quality=0 → effectiveMaxSizeMB = 0 → targetBytes = 0
+		// 任何非空文件都不会跳过
+		const file = new File([new Uint8Array(100)], "small.jpg", {
+			type: "image/jpeg",
+		});
+		try {
+			const result = await compressImage(file, 1, { quality: 0 });
+			expect(result.skipped).not.toBe(true);
+		} catch (err) {
+			// Node 环境中解码会失败，但不应该返回 skipped
+			expect(err).toBeInstanceOf(Error);
+		}
+	});
+
+	it("超大目标大小时小文件跳过", async () => {
+		const file = new File([new Uint8Array(1024)], "tiny.png", {
+			type: "image/png",
+		});
+		const result = await compressImage(file, 200, {});
+		// 1KB << 200MB → skip
+		expect(result.skipped).toBe(true);
+		expect(result.fileName).toBe("tiny.png");
+	});
+});
+
+// ===================== HEIC 错误分类测试（审计 3.1 回归） =====================
+
+describe("convertHeicToJpeg 错误分类（3.1）", () => {
+	const makeHeicFile = (size = 1024 * 1024) =>
+		new File([new Uint8Array(size)], "test.heic", { type: "image/heic" });
+
+	beforeEach(async () => {
+		// 确保每个测试开始前 mock 被重置
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockReset();
+	});
+
+	it("动态导入抛出 TypeError 时提示加载失败", async () => {
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockRejectedValue(
+			new TypeError("Failed to fetch dynamically imported module"),
+		);
+
+		// 1MB 文件，目标 0.5MB → 不跳过，触发解码
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 解码库加载失败，请检查网络连接后重试",
+		);
+	});
+
+	it("heic2any 抛出 'Loading chunk' 错误时提示加载失败", async () => {
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockRejectedValue(
+			new Error("Loading chunk 3 failed."),
+		);
+
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 解码库加载失败，请检查网络连接后重试",
+		);
+	});
+
+	it("heic2any 抛出 'Importing a module script failed' 时提示加载失败", async () => {
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockRejectedValue(
+			new Error("Importing a module script failed."),
+		);
+
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 解码库加载失败，请检查网络连接后重试",
+		);
+	});
+
+	it("heic2any 抛出格式转换错误时提示文件名", async () => {
+		const heic2anyModule = await import("heic2any");
+		// 非 TypeError，非加载相关错误 → 格式转换失败
+		vi.mocked(heic2anyModule.default).mockRejectedValue(
+			new Error("Invalid HEIC data"),
+		);
+
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 格式转换失败: test.heic",
+		);
+	});
+
+	it("heic2any 返回空结果时提示格式转换失败", async () => {
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockResolvedValue(null);
+
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 格式转换失败: test.heic",
+		);
+	});
+
+	it("heic2any 返回空数组时提示格式转换失败", async () => {
+		const heic2anyModule = await import("heic2any");
+		vi.mocked(heic2anyModule.default).mockResolvedValue([]);
+
+		const file = makeHeicFile(1024 * 1024);
+		await expect(compressImage(file, 0.5, {})).rejects.toThrow(
+			"HEIC 格式转换失败: test.heic",
+		);
+	});
+});
+
+

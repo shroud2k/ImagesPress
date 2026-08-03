@@ -35,6 +35,7 @@ import {
 	isSupportedImage,
 	formatFileSize,
 	getPreviewUrl,
+	revokePreviewUrl,
 	getFormatLabel,
 	ALL_EXTENSIONS,
 } from "@/lib/imageCompress";
@@ -104,9 +105,11 @@ const RENDER_BATCH = 10;
 const CONCURRENT_LIMIT = 3;
 const MAX_FILE_SIZE = 200 * 1024 * 1024; // 单文件最大 200MB（1.1）
 const MAX_FILE_COUNT = 100; // 最多 100 个文件（1.2）
+const ZIP_SIZE_WARNING_THRESHOLD = 500 * 1024 * 1024; // 3.3: ZIP 打包大小警告阈值 500MB
 
-// 使用时间戳+随机数生成唯一 ID，避免 HMR 后计数器不重置的问题（3.2）
-const nextId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+// 4.3: 添加自增计数器作为第三层保护，避免时间戳+随机数碰撞
+let _idCounter = 0;
+const nextId = () => `${Date.now()}-${++_idCounter}-${Math.random().toString(36).slice(2, 11)}`;
 
 async function extractFilesFromDataTransfer(dataTransfer) {
 	const allFiles = [];
@@ -258,6 +261,7 @@ const FileRow = memo(function FileRow({
 							value={progress}
 							className="h-1 rounded-none"
 							style={{ backgroundColor: C.surface2 }}
+							aria-label="单文件压缩进度"
 						/>
 					</div>
 				)}
@@ -346,6 +350,8 @@ const Index = () => {
 	filesRef.current = files;
 	const pausedRef = useRef(false);
 	const pauseResolversRef = useRef([]);
+	// 1.3: 追踪活跃的下载 Object URL，组件卸载时清理
+	const activeDownloadUrlsRef = useRef(new Set());
 
 	const waitIfPaused = useCallback(() => {
 		if (!pausedRef.current) return Promise.resolve();
@@ -493,7 +499,7 @@ const Index = () => {
 	const removeFile = useCallback((id) => {
 		setFiles((prev) => {
 			const f = prev.find((x) => x.id === id);
-			if (f?.preview) URL.revokeObjectURL(f.preview);
+			if (f?.preview) revokePreviewUrl(f.preview);
 			return prev.filter((x) => x.id !== id);
 		});
 	}, []);
@@ -505,7 +511,7 @@ const Index = () => {
 			return;
 		}
 		snapshot.forEach((f) => {
-			if (f.preview) URL.revokeObjectURL(f.preview);
+			if (f.preview) revokePreviewUrl(f.preview);
 		});
 		setFiles([]);
 		setOverallProgress(0);
@@ -626,6 +632,7 @@ const Index = () => {
 		let url;
 		try {
 			url = URL.createObjectURL(fileItem.result.blob);
+			activeDownloadUrlsRef.current.add(url);
 			const a = document.createElement("a");
 			a.href = url;
 			a.download = fileItem.result.fileName;
@@ -634,7 +641,10 @@ const Index = () => {
 			document.body.removeChild(a);
 		} finally {
 			// 确保异常时也能释放 Object URL（3.4）
-			if (url) URL.revokeObjectURL(url);
+			if (url) {
+				URL.revokeObjectURL(url);
+				activeDownloadUrlsRef.current.delete(url);
+			}
 		}
 	}, []);
 
@@ -642,6 +652,17 @@ const Index = () => {
 		if (doneFiles.length === 0) return;
 		if (doneFiles.length === 1) {
 			downloadSingle(doneFiles[0]);
+			return;
+		}
+		// 3.3: ZIP 打包前预估总大小，超过阈值时提示用户分批下载
+		const totalZipSize = doneFiles.reduce(
+			(s, f) => s + (f.result?.compressedSize || 0),
+			0,
+		);
+		if (totalZipSize > ZIP_SIZE_WARNING_THRESHOLD) {
+			toast.warning(
+				`文件总大小约 ${formatFileSize(totalZipSize)}，超过 ${formatFileSize(ZIP_SIZE_WARNING_THRESHOLD)}，建议分批下载以避免浏览器崩溃`,
+			);
 			return;
 		}
 		const zipToastId = "zip-packaging";
@@ -662,6 +683,7 @@ const Index = () => {
 				},
 			);
 			url = URL.createObjectURL(content);
+			activeDownloadUrlsRef.current.add(url);
 			const a = document.createElement("a");
 			a.href = url;
 			a.download = "compressed-images.zip";
@@ -673,7 +695,10 @@ const Index = () => {
 			toast.error("打包失败: " + err.message, { id: zipToastId });
 		} finally {
 			// 确保异常时也能释放 Object URL（3.4）
-			if (url) URL.revokeObjectURL(url);
+			if (url) {
+				URL.revokeObjectURL(url);
+				activeDownloadUrlsRef.current.delete(url);
+			}
 		}
 	}, [doneFiles, downloadSingle]);
 
@@ -690,8 +715,13 @@ const Index = () => {
 	useEffect(() => {
 		return () => {
 			filesRef.current.forEach((f) => {
-				if (f.preview) URL.revokeObjectURL(f.preview);
+				if (f.preview) revokePreviewUrl(f.preview);
 			});
+			// 1.3: 清理可能残留的下载 Object URL
+			activeDownloadUrlsRef.current.forEach((url) => {
+				URL.revokeObjectURL(url);
+			});
+			activeDownloadUrlsRef.current.clear();
 		};
 	}, []);
 
@@ -1048,16 +1078,20 @@ const Index = () => {
 						<div
 							className="border divide-y"
 							style={{ borderColor: C.hairline }}
+							role="list"
+							aria-live="polite"
+							aria-label="文件列表"
 						>
 						{visibleFiles.map((fileItem) => (
-							<FileRow
-								key={fileItem.id}
-								item={fileItem}
-								onRemove={removeFile}
-								onDownload={downloadSingle}
-								onRetry={retryFile}
-								isCompressing={isCompressing}
-							/>
+							<div role="listitem" key={fileItem.id}>
+								<FileRow
+									item={fileItem}
+									onRemove={removeFile}
+									onDownload={downloadSingle}
+									onRetry={retryFile}
+									isCompressing={isCompressing}
+								/>
+							</div>
 						))}
 						</div>
 						{hasMoreFiles && (
@@ -1165,11 +1199,12 @@ const Index = () => {
 							)}
 							{isCompressing && (
 								<div className="flex-1 w-full sm:w-auto">
-									<Progress
-										value={overallProgress}
-										className="h-2 rounded-none"
-										style={{ backgroundColor: C.surface2 }}
-									/>
+						<Progress
+							value={overallProgress}
+							className="h-2 rounded-none"
+							style={{ backgroundColor: C.surface2 }}
+							aria-label="总压缩进度"
+						/>
 								</div>
 							)}
 							</div>

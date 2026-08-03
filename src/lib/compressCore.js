@@ -19,6 +19,24 @@ export class CompressAbortError extends Error {
 	}
 }
 
+// ---- 压缩参数配置（4.2: 统一管理魔法数字，便于调优） ----
+
+const CONFIG = {
+	JPEG_QUALITY_ITERS: 6,      // JPEG 质量二分迭代次数
+	SCALE_ITERS: 8,             // 缩放比例二分迭代次数
+	UPSCALE_ITERS: 6,           // 放大比例二分迭代次数
+	EDGE_MAX_PROBES: 6,         // edgeRefine 探测上限
+	EDGE_PROBE_OFFSETS: [1, 2, 3, 5, 8, 13], // edgeRefine 像素偏移候选
+	REFINE_FACTORS: [0.5, 0.75], // 局部上探比例因子
+	MAX_UPSCALE: 1.3,           // 放大上限
+	MIN_SCALE: 0.05,            // 最小缩放比例
+	MIN_QUALITY: 0.1,           // 兜底最低质量
+	JPEG_MIN_QUALITY_START: 0.5, // JPEG 质量二分下限
+	JPEG_FALLBACK_QUALITY: 0.85, // JPEG 降分辨率回退质量
+	NEAR_TARGET_RATIO: 0.9,     // 已接近目标大小的判定比例
+	EDGE_REFINE_THRESHOLD: 0.98, // edgeRefine 跳过阈值
+};
+
 // ---- 上下文检测 ----
 
 // Worker 中无需 yield（不阻塞主线程）；主线程需要 yield 让 UI 有机会响应
@@ -110,7 +128,7 @@ export async function compressCore(img, options, callbacks = {}) {
 
 	// 固定质量，二分缩放比例（缩小），输出不超过 target 的最大文件
 	const searchByScale = async (q, iters, progressBase, progressSpan) => {
-		let lo = 0.05,
+		let lo = CONFIG.MIN_SCALE,
 			hi = 1.0,
 			best = null,
 			bestScale = 0;
@@ -133,7 +151,7 @@ export async function compressCore(img, options, callbacks = {}) {
 		// 局部上探精炼：大小-缩放曲线非单调（缩放会平滑噪点），
 		// 二分结果可能偏小，在 (bestScale, hi) 区间内继续上探用满预算
 		if (best) {
-			for (const f of [0.5, 0.75]) {
+			for (const f of CONFIG.REFINE_FACTORS) {
 				checkAbort();
 				const s = bestScale + (hi - bestScale) * f;
 				if (s <= bestScale || s >= 1.0) continue;
@@ -168,7 +186,7 @@ export async function compressCore(img, options, callbacks = {}) {
 			}
 		}
 		if (best) {
-			for (const f of [0.5, 0.75]) {
+			for (const f of CONFIG.REFINE_FACTORS) {
 				checkAbort();
 				const s = bestScale + (hi - bestScale) * f;
 				if (s <= bestScale || s > maxScale) continue;
@@ -195,19 +213,18 @@ export async function compressCore(img, options, callbacks = {}) {
 	// 文件大小在满幅边缘形成尖顶（实测：4671x7007→28.9MB，4672x7007→31.3MB，
 	// 4672x7008→32.9MB），这些候选是保留原始细节最多且不超标的选择
 	const edgeRefine = async (q, current) => {
-		if (current && current.size >= targetBytes * 0.98) return current;
+		if (current && current.size >= targetBytes * CONFIG.EDGE_REFINE_THRESHOLD) return current;
 		let best = current;
 		const seen = new Set();
 		const candidates = [];
-		for (const k of [1, 2, 3, 5, 8, 13]) {
+		for (const k of CONFIG.EDGE_PROBE_OFFSETS) {
 			candidates.push([w, h - k], [w - k, h]);
 		}
 		// 按像素总数从大到小排序，最接近满幅的优先
 		candidates.sort((a, b) => b[0] * b[1] - a[0] * a[1]);
-		const MAX_PROBES = 6; // 限制探测次数，避免尖顶全超标时耗时过长
 		let probes = 0;
 		for (const [cw, ch] of candidates) {
-			if (probes >= MAX_PROBES) break;
+			if (probes >= CONFIG.EDGE_MAX_PROBES) break;
 			if (cw < 1 || ch < 1 || (cw === w && ch === h)) continue;
 			const key = cw + "x" + ch;
 			if (seen.has(key)) continue;
@@ -234,24 +251,23 @@ export async function compressCore(img, options, callbacks = {}) {
 			if (full.size <= targetBytes) {
 				bestBlob = full;
 			} else {
-				bestBlob = await searchByScale(undefined, 8, 35, 55);
+				bestBlob = await searchByScale(undefined, CONFIG.SCALE_ITERS, 35, 55);
 				bestBlob = await edgeRefine(undefined, bestBlob);
 			}
 		} else {
 			// JPEG：先在原分辨率下二分质量
-			let lo = 0.5,
+			let lo = CONFIG.JPEG_MIN_QUALITY_START,
 				hi = 1.0,
 				bestFit = null, // 不超过 target 的最高质量结果
 				bestFitQ = null,
 				firstMiss = null, // 超过 target 的最低质量结果（档位跳变点）
 				firstMissQ = null;
-			const Q_ITERS = 6;
-			for (let i = 0; i < Q_ITERS; i++) {
+			for (let i = 0; i < CONFIG.JPEG_QUALITY_ITERS; i++) {
 				checkAbort();
 				await yieldToMain();
 				const mid = (lo + hi) / 2;
 				const blob = await encodeAt(1, mid);
-				onProgress?.(15 + Math.round(((i + 1) / Q_ITERS) * 45));
+				onProgress?.(15 + Math.round(((i + 1) / CONFIG.JPEG_QUALITY_ITERS) * 45));
 				if (blob.size <= targetBytes) {
 					if (bestFitQ === null || mid > bestFitQ) {
 						bestFit = blob;
@@ -269,21 +285,21 @@ export async function compressCore(img, options, callbacks = {}) {
 
 			if (!bestFit) {
 				// 原分辨率下最低质量也超标，降低分辨率逼近目标
-				bestBlob = await searchByScale(0.85, 8, 60, 30);
+				bestBlob = await searchByScale(CONFIG.JPEG_FALLBACK_QUALITY, CONFIG.SCALE_ITERS, 60, 30);
 			} else if (!firstMiss) {
 				// 所有质量档（含 q≈1.0）全分辨率都小于目标（原图编码效率低，
 				// 如相机直出 JPEG）：质量已到顶，通过适度放大分辨率用满目标
 				// 大小预算（上限 1.3x）
-				const upscaled = await searchUpscale(1.0, 1.3, 6, 60, 30);
+				const upscaled = await searchUpscale(1.0, CONFIG.MAX_UPSCALE, CONFIG.UPSCALE_ITERS, 60, 30);
 				bestBlob = upscaled || bestFit;
-			} else if (bestFit.size >= targetBytes * 0.9) {
+			} else if (bestFit.size >= targetBytes * CONFIG.NEAR_TARGET_RATIO) {
 				// 已足够接近目标大小
 				bestBlob = bestFit;
 			} else {
 				// 编码器质量档位发生跳变（如 4:2:0 → 4:4:4 色度抽样切换）：
 				// 全分辨率下合规档远小于目标、超标档又太大。
 				// 改用超标档的高画质 + 轻微缩小分辨率，让输出尽量接近目标大小。
-				const scaled = await searchByScale(firstMissQ, 6, 60, 30);
+				const scaled = await searchByScale(firstMissQ, CONFIG.SCALE_ITERS, 60, 30);
 				bestBlob = scaled && scaled.size > bestFit.size ? scaled : bestFit;
 				bestBlob = await edgeRefine(firstMissQ, bestBlob);
 			}
@@ -293,7 +309,7 @@ export async function compressCore(img, options, callbacks = {}) {
 			// 兜底：所有搜索策略均未产出合规结果时，使用最小缩放 + 最低质量编码。
 			// PNG: searchByScale 最小测试缩放约 0.054，此处 0.05 更小，确保产出有效 blob。
 			// JPEG: quality 0.1 低于 searchByScale 使用的起始质量，可产出更小文件。
-			bestBlob = await encodeAt(0.05, usePng ? undefined : 0.1);
+			bestBlob = await encodeAt(CONFIG.MIN_SCALE, usePng ? undefined : CONFIG.MIN_QUALITY);
 		}
 
 		onProgress?.(95);

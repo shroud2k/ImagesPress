@@ -11,13 +11,11 @@
 
 import { compressCore, CompressAbortError } from "./compressCore";
 
-let aborted = false;
-
 self.onmessage = async (e) => {
 	const { type } = e.data;
 
 	if (type === "abort") {
-		aborted = true;
+		// abort 由压缩任务自身的监听器处理，此处无需操作
 		return;
 	}
 
@@ -26,15 +24,23 @@ self.onmessage = async (e) => {
 		return;
 	}
 
-	aborted = false;
 	const { bitmap, options } = e.data;
+
+	// 3.6: aborted 移至局部作用域，避免多任务交叉污染
+	const aborted = { value: false };
+	const onAbortMessage = (ev) => {
+		if (ev.data.type === "abort") {
+			aborted.value = true;
+		}
+	};
+	self.addEventListener("message", onAbortMessage);
 
 	try {
 		const result = await compressCore(bitmap, options, {
 			onProgress: (p) => {
 				self.postMessage({ type: "progress", progress: p });
 			},
-			shouldAbort: () => aborted,
+			shouldAbort: () => aborted.value,
 		});
 
 		// 关闭 ImageBitmap 释放内存
@@ -56,5 +62,8 @@ self.onmessage = async (e) => {
 				: err.message || "压缩失败";
 
 		self.postMessage({ type: "error", message });
+	} finally {
+		// 3.6: 任务结束后移除监听器，防止泄漏
+		self.removeEventListener("message", onAbortMessage);
 	}
 };

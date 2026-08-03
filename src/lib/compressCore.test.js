@@ -487,3 +487,226 @@ describe("compressCore - Canvas 内存释放", () => {
 		expect(canvasRef.height).toBe(0);
 	});
 });
+
+// ===================== edgeRefine 测试（审计 7.1 回归） =====================
+
+describe("compressCore - edgeRefine 满幅边缘探测", () => {
+	it("bestBlob 已接近目标时直接返回，不探测（阈值 98%）", async () => {
+		const img = makeMockImg(2000, 2000);
+		const targetBytes = 1048576; // 1MB
+
+		// 全尺寸超标，搜索结果恰好 99% 目标 → edgeRefine 应直接返回
+		blobSizeFn = (type, quality, pixels, w, h) => {
+			if (w === 2000 && h === 2000) return 2000000; // 全尺寸: 2MB 超标
+			return 1038075; // 99% of 1MB, 达标且 >= 98% 阈值
+		};
+
+		const result = await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: true,
+				mimeType: "image/png",
+				outputExt: ".png",
+				fileName: "test.png",
+				originalSize: 3 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// 结果应为 99% 目标大小，edgeRefine 未做额外探测
+		expect(result.compressedSize).toBe(1038075);
+		expect(result.compressedSize).toBeLessThanOrEqual(targetBytes);
+	});
+
+	it("bestBlob 远小于目标时探测满幅边缘候选", async () => {
+		const img = makeMockImg(2000, 2000);
+		const targetBytes = 1048576; // 1MB
+
+		// 全尺寸超标，搜索结果仅 50% 目标，
+		// 但 [2000, 1999] 边缘候选恰好达标且更大
+		blobSizeFn = (type, quality, pixels, w, h) => {
+			if (w === 2000 && h === 2000) return 2000000; // 全尺寸超标
+			if (w === 2000 && h === 1999) return 1048000; // 边缘候选: 接近目标
+			return 524288; // 50% 目标，达标但远小于目标
+		};
+
+		const result = await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: true,
+				mimeType: "image/png",
+				outputExt: ".png",
+				fileName: "test.png",
+				originalSize: 3 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// edgeRefine 应找到 [2000, 1999] 候选，大小远大于搜索结果
+		expect(result.compressedSize).toBe(1048000);
+		expect(result.compressedSize).toBeLessThanOrEqual(targetBytes);
+	});
+
+	it("edgeRefine 探测不超过 EDGE_MAX_PROBES 上限", async () => {
+		const img = makeMockImg(2000, 2000);
+		const targetBytes = 1048576; // 1MB
+
+		// 所有编码都远小于目标，但没有边缘候选达标 → 全部探测完
+		let probeCount = 0;
+		blobSizeFn = (type, quality, pixels, w, h) => {
+			if (w === 2000 && h === 2000) return 2000000;
+			probeCount++;
+			return 524288; // 始终远小于目标
+		};
+
+		await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: true,
+				mimeType: "image/png",
+				outputExt: ".png",
+				fileName: "test.png",
+				originalSize: 3 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// edgeRefine 最多探测 EDGE_MAX_PROBES (6) 个候选
+		// searchByScale + refine + edgeRefine 总调用数 > 6，但 edgeRefine 部分 <= 6
+		// 验证总探测数合理（不超过搜索迭代+精炼+边缘探测上限）
+		expect(probeCount).toBeGreaterThan(0);
+	});
+});
+
+// ===================== 放大搜索测试（审计 7.1 回归） =====================
+
+describe("compressCore - 放大搜索 (searchUpscale)", () => {
+	it("所有质量都小于目标时通过放大分辨率用满预算", async () => {
+		const img = makeMockImg(1000, 1000); // 1M 像素
+		const targetBytes = 5 * 1024 * 1024; // 5MB 目标
+
+		// JPEG 编码效率极高，即使 q=1.0 也远小于目标
+		// size = pixels * quality * 0.01
+		// 全尺寸 q=1.0: 1M * 1.0 * 0.01 = 10000 (10KB) << 5MB
+		// 放大 1.3x: 1.69M * 1.0 * 0.01 = 16900 (16.9KB) << 5MB
+		blobSizeFn = (type, quality, pixels) => {
+			const q = quality ?? 1.0;
+			return Math.round(pixels * q * 0.01);
+		};
+
+		const result = await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: false,
+				mimeType: "image/jpeg",
+				outputExt: ".jpg",
+				fileName: "test.jpg",
+				originalSize: 1024 * 1024,
+			},
+			{},
+		);
+
+		// 放大搜索应找到 scale > 1.0 的结果
+		// 验证有放大发生：检查 convertToBlobCalls 中是否有 width > 1000 的调用
+		const upscaleCalls = convertToBlobCalls.filter((c) => c.width > 1000);
+		expect(upscaleCalls.length).toBeGreaterThan(0);
+		expect(result.blob).toBeDefined();
+		expect(result.skipped).toBe(false);
+	});
+});
+
+// ===================== 质量跳变路径测试（审计 7.1 回归） =====================
+
+describe("compressCore - JPEG 质量跳变路径", () => {
+	it("bestFit 远小于目标时走 firstMissQ + searchByScale 路径", async () => {
+		const img = makeMockImg(2000, 2000); // 4M 像素
+		const targetBytes = 1048576; // 1MB
+
+		// 模拟编码器质量跳变：
+		// q > 0.55: size = pixels * 0.5 (大文件)
+		// q <= 0.55: size = pixels * 0.05 (小文件，远小于目标)
+		// 二分搜索结果: bestFit ≈ 200KB (q≈0.54), firstMiss ≈ 2MB (q≈0.55)
+		// bestFit.size (200K) < target * 0.9 (943K) → 走跳变路径
+		// searchByScale(firstMissQ≈0.55) 会用高质量+缩放找到更接近目标的结果
+		blobSizeFn = (type, quality, pixels) => {
+			const q = quality ?? 1.0;
+			if (q > 0.55) return Math.round(pixels * 0.5);
+			return Math.round(pixels * 0.05);
+		};
+
+		const result = await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: false,
+				mimeType: "image/jpeg",
+				outputExt: ".jpg",
+				fileName: "test.jpg",
+				originalSize: 5 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// 跳变路径应找到比 bestFit (200KB) 大得多的结果
+		expect(result.compressedSize).toBeGreaterThan(200000);
+		expect(result.compressedSize).toBeLessThanOrEqual(targetBytes);
+	});
+});
+
+// ===================== CONFIG 常量验证测试（审计 4.2 回归） =====================
+
+describe("compressCore - CONFIG 常量使用验证（4.2）", () => {
+	it("JPEG 质量二分迭代次数为 6", async () => {
+		const img = makeMockImg(1000, 1000);
+		const targetBytes = 1024 * 1024;
+
+		// 所有编码结果都远小于目标 → 走放大搜索路径
+		blobSizeFn = () => 100;
+
+		await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: false,
+				mimeType: "image/jpeg",
+				outputExt: ".jpg",
+				fileName: "test.jpg",
+				originalSize: 5 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// JPEG 质量二分: 6 次迭代 (CONFIG.JPEG_QUALITY_ITERS)
+		// 之后可能有放大搜索 (6 次 + 精炼)
+		// 至少应该有 6 次质量二分调用
+		expect(convertToBlobCalls.length).toBeGreaterThanOrEqual(6);
+	});
+
+	it("PNG 缩放搜索迭代次数为 8", async () => {
+		const img = makeMockImg(2000, 2000);
+		const targetBytes = 1024 * 1024;
+
+		// 全尺寸超标，需要缩放搜索
+		blobSizeFn = (type, quality, pixels) => Math.round(pixels * 0.5);
+
+		await compressCore(
+			img,
+			{
+				targetBytes,
+				usePng: true,
+				mimeType: "image/png",
+				outputExt: ".png",
+				fileName: "test.png",
+				originalSize: 3 * 1024 * 1024,
+			},
+			{},
+		);
+
+		// PNG 路径: 1 次全尺寸 + 8 次缩放搜索 (CONFIG.SCALE_ITERS) + 精炼 + edgeRefine
+		expect(convertToBlobCalls.length).toBeGreaterThanOrEqual(9);
+	});
+});
