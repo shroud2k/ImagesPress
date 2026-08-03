@@ -18,6 +18,10 @@ import {
 	ChevronDown,
 	Pause,
 	Play,
+	ExternalLink,
+	Repeat,
+	RotateCw,
+	Video,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,6 +71,33 @@ const PRESET_SIZES = [
 	{ label: "32 MB", value: 32 },
 	{ label: "50 MB", value: 50 },
 	{ label: "100 MB", value: 100 },
+];
+
+const RELATED_TOOLS = [
+	{
+		title: "图片格式转换",
+		url: "https://ic.yiruoyu.com",
+		Icon: Repeat,
+		desc: "在线图片格式转换",
+	},
+	{
+		title: "图片压缩",
+		url: "https://ip.yiruoyu.com",
+		Icon: Zap,
+		desc: "在线图片压缩",
+	},
+	{
+		title: "图片自适应旋转",
+		url: "https://ir.yiruoyu.com",
+		Icon: RotateCw,
+		desc: "在线图片自适应旋转",
+	},
+	{
+		title: "视频体积压缩",
+		url: "https://v.yiruoyu.com",
+		Icon: Video,
+		desc: "在线视频体积压缩",
+	},
 ];
 
 const RENDER_BATCH = 10;
@@ -1266,6 +1297,82 @@ const Index = () => {
 					</section>
 				)}
 			</main>
+
+			<section
+				className="border-t"
+				style={{ borderColor: C.hairline, backgroundColor: C.canvas }}
+			>
+				<div className="max-w-[1200px] mx-auto px-6 py-12">
+					<div className="flex items-center gap-2 mb-6">
+						<span
+							className="w-6 h-6 flex items-center justify-center text-xs font-semibold text-white"
+							style={{ backgroundColor: C.blue }}
+						>
+							<Zap className="w-3.5 h-3.5" />
+						</span>
+						<h2 className="text-xl font-normal" style={{ color: C.ink }}>
+							相关工具
+						</h2>
+					</div>
+					<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+						{RELATED_TOOLS.map((tool) => {
+							const { Icon } = tool;
+							return (
+								<a
+									key={tool.url}
+									href={tool.url}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="flex items-center gap-3 p-4 border transition-colors"
+									style={{
+										borderColor: C.hairline,
+										backgroundColor: C.surface1,
+									}}
+									onMouseEnter={(e) => {
+										e.currentTarget.style.borderColor = C.blue;
+											e.currentTarget.style.backgroundColor =
+												"#edf5ff";
+									}}
+									onMouseLeave={(e) => {
+										e.currentTarget.style.borderColor = C.hairline;
+											e.currentTarget.style.backgroundColor = C.surface1;
+									}}
+								>
+									<div
+										className="w-10 h-10 flex items-center justify-center flex-shrink-0"
+										style={{ backgroundColor: C.canvas }}
+									>
+											<Icon
+												className="w-5 h-5"
+												style={{ color: C.blue }}
+											/>
+										</div>
+									<div className="flex-1 min-w-0">
+										<div className="flex items-center gap-1 mb-0.5">
+											<p
+												className="text-sm font-semibold truncate"
+												style={{ color: C.ink }}
+											>
+												{tool.title}
+											</p>
+											<ExternalLink
+												className="w-3 h-3 flex-shrink-0"
+												style={{ color: C.inkSubtle }}
+											/>
+										</div>
+										<p
+											className="text-xs truncate"
+											style={{ color: C.inkSubtle }}
+										>
+												{tool.url.replace("https://", "")}
+										</p>
+									</div>
+								</a>
+							);
+						})}
+					</div>
+				</div>
+			</section>
 
 			<footer
 				className="border-t py-8"
