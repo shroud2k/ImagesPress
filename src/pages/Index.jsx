@@ -758,73 +758,6 @@ const Index = () => {
 				style={{ borderColor: C.hairline, backgroundColor: C.surface1 }}
 			>
 				<div className="max-w-[1200px] mx-auto px-6 py-6">
-					<p className="text-sm mb-4" style={{ color: C.inkMuted }}>
-						相关工具
-					</p>
-					<div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-						{RELATED_TOOLS.map((tool) => {
-							const { Icon } = tool;
-							return (
-								<a
-									key={tool.url}
-									href={tool.url}
-									target="_blank"
-									rel="noopener noreferrer"
-									className="flex items-center gap-3 px-4 py-3 border transition-colors"
-									style={{
-										borderColor: C.hairline,
-										backgroundColor: C.canvas,
-									}}
-									onMouseEnter={(e) => {
-										e.currentTarget.style.borderColor = C.blue;
-											e.currentTarget.style.backgroundColor = "#edf5ff";
-									}}
-									onMouseLeave={(e) => {
-										e.currentTarget.style.borderColor = C.hairline;
-											e.currentTarget.style.backgroundColor = C.canvas;
-									}}
-								>
-									<div
-										className="w-9 h-9 flex items-center justify-center flex-shrink-0"
-										style={{ backgroundColor: C.surface1 }}
-									>
-											<Icon
-												className="w-4 h-4"
-												style={{ color: C.blue }}
-											/>
-										</div>
-									<div className="flex-1 min-w-0">
-										<div className="flex items-center gap-1">
-											<p
-												className="text-sm font-semibold truncate"
-												style={{ color: C.ink }}
-											>
-												{tool.title}
-											</p>
-											<ExternalLink
-												className="w-3 h-3 flex-shrink-0"
-												style={{ color: C.inkSubtle }}
-											/>
-										</div>
-										<p
-											className="text-xs truncate"
-											style={{ color: C.inkSubtle }}
-										>
-												{tool.url.replace("https://", "")}
-										</p>
-									</div>
-								</a>
-							);
-						})}
-					</div>
-				</div>
-			</section>
-
-			<section
-				className="border-b"
-				style={{ borderColor: C.hairline, backgroundColor: C.surface1 }}
-			>
-				<div className="max-w-[1200px] mx-auto px-6 py-6">
 					<div className="grid grid-cols-2 md:grid-cols-4 gap-0">
 						{STEPS.map((step, i) => (
 							<div
@@ -1369,21 +1302,82 @@ const Index = () => {
 				className="border-t py-8"
 				style={{ borderColor: C.hairline, backgroundColor: C.surface1 }}
 			>
-				<div className="max-w-[1200px] mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-					<div className="flex items-center gap-3">
-						<div
-							className="w-6 h-6 flex items-center justify-center"
-							style={{ backgroundColor: C.blue }}
-						>
-							<Zap className="w-3 h-3 text-white" />
-						</div>
-						<span className="text-sm" style={{ color: C.inkMuted }}>
-							ImagePress — 图片压缩工具
-						</span>
-					</div>
-					<p className="text-xs" style={{ color: C.inkSubtle }}>
-						所有处理均在浏览器本地完成 · 不会上传任何文件
+				<div className="max-w-[1200px] mx-auto px-6">
+					<p className="text-sm mb-4" style={{ color: C.inkMuted }}>
+						相关工具
 					</p>
+					<div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+						{RELATED_TOOLS.map((tool) => {
+							const { Icon } = tool;
+							return (
+								<a
+									key={tool.url}
+									href={tool.url}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="flex items-center gap-3 px-4 py-3 border transition-colors"
+									style={{
+										borderColor: C.hairline,
+										backgroundColor: C.canvas,
+									}}
+									onMouseEnter={(e) => {
+										e.currentTarget.style.borderColor = C.blue;
+										e.currentTarget.style.backgroundColor = "#edf5ff";
+									}}
+									onMouseLeave={(e) => {
+										e.currentTarget.style.borderColor = C.hairline;
+										e.currentTarget.style.backgroundColor = C.canvas;
+									}}
+								>
+									<div
+										className="w-9 h-9 flex items-center justify-center flex-shrink-0"
+										style={{ backgroundColor: C.surface1 }}
+									>
+										<Icon
+											className="w-4 h-4"
+											style={{ color: C.blue }}
+										/>
+									</div>
+									<div className="flex-1 min-w-0">
+										<div className="flex items-center gap-1">
+											<p
+												className="text-sm font-semibold truncate"
+												style={{ color: C.ink }}
+											>
+												{tool.title}
+											</p>
+											<ExternalLink
+												className="w-3 h-3 flex-shrink-0"
+												style={{ color: C.inkSubtle }}
+											/>
+										</div>
+										<p
+											className="text-xs truncate"
+											style={{ color: C.inkSubtle }}
+										>
+											{tool.url.replace("https://", "")}
+										</p>
+									</div>
+								</a>
+							);
+						})}
+					</div>
+					<div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-6 border-t" style={{ borderColor: C.hairline }}>
+						<div className="flex items-center gap-3">
+							<div
+								className="w-6 h-6 flex items-center justify-center"
+								style={{ backgroundColor: C.blue }}
+							>
+								<Zap className="w-3 h-3 text-white" />
+							</div>
+							<span className="text-sm" style={{ color: C.inkMuted }}>
+								ImagePress — 图片压缩工具
+							</span>
+						</div>
+						<p className="text-xs" style={{ color: C.inkSubtle }}>
+							所有处理均在浏览器本地完成 · 不会上传任何文件
+						</p>
+					</div>
 				</div>
 			</footer>
 		</div>
