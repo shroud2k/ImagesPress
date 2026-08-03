@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background rounded square -->
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="#6366f1"/>
+  <!-- Image frame -->
+  <rect x="16" y="16" width="32" height="32" rx="4" fill="none" stroke="#ffffff" stroke-width="3"/>
+  <!-- Mountain/landscape inside frame -->
+  <path d="M20 42 L28 32 L33 37 L38 30 L44 42 Z" fill="#ffffff" opacity="0.9"/>
+  <!-- Sun dot -->
+  <circle cx="25" cy="24" r="3" fill="#ffffff" opacity="0.9"/>
+  <!-- Compression arrows (inward) -->
+  <path d="M10 32 L16 32 M13 29 L10 32 L13 35" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M54 32 L48 32 M51 29 L54 32 L51 35" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
